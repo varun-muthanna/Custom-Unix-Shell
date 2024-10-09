@@ -9,6 +9,13 @@
 #define BUFSIZE 1024 //size of buffer in bytes
 #define TOKBUFSIZE 64
 
+
+int cmd_len;
+
+typedef struct Command{
+    char **args;
+}C;
+
 char *get_input(){
     int pos=0,sz=BUFSIZE;
     char *line=malloc(sz*sizeof(char));
@@ -47,6 +54,7 @@ char *get_input(){
     return line;
 }
 
+
 char **tokenize(char *line){
     int sz=TOKBUFSIZE,pos=0;
     const char *del= " \n\t\a\r";
@@ -61,8 +69,11 @@ char **tokenize(char *line){
 
     while(token!=NULL){
 
-        args[pos]=token;
-        ++pos;
+        if(strcmp(token,"|")==0){
+            args[pos++]=strdup("|"); //dynamically allocate , so  we can free
+        }else {
+            args[pos++]=token;
+        }
 
         if(pos>=sz){
             sz+=TOKBUFSIZE;
@@ -80,6 +91,57 @@ char **tokenize(char *line){
     args[pos]=NULL;
 
     return args;
+}
+
+
+
+C *parse_cmd(char **line){
+    int sz=TOKBUFSIZE,pos=0,i=0;
+
+    char **args= malloc(sz*sizeof(char*)); //size of pointer to char , (system specific - 64 bit or 32 bit system)
+
+    C *commands = malloc(sz*sizeof(C)); //should create array of commands (tokens)
+
+    if(!args){
+        printf("Allocation error");
+        exit(EXIT_FAILURE);
+    }
+
+    for(int j=0;line[j]!=NULL;j++){
+
+        if(strcmp(line[j],"|")==0){
+            args[pos]=NULL;
+            commands[i++].args=args;
+
+            pos=0;
+            args=malloc(sz*sizeof(char*));
+            if(!args){
+                printf("Allocation error");
+                exit(EXIT_FAILURE);
+            }
+
+            continue;
+        }
+
+        args[pos]=line[j];
+        ++pos;
+
+        if(pos>=sz){
+            sz+=TOKBUFSIZE;
+            args= realloc(args,sz*sizeof(char*));
+            if(!args){
+                printf("Allocation error");
+                exit(EXIT_FAILURE);
+            }
+        }
+    }
+
+    args[pos]=NULL;
+    commands[i++].args=args;
+
+    cmd_len=i;
+
+    return commands;
 }
 
 int sh_cd(char **args);
@@ -129,7 +191,7 @@ int external(char **args){
 
     int status;
 
-    pid_t pid = fork();
+    pid_t pid = fork(); //shell itself would be replaced
 
     if(pid==-1){
         printf("fork failed");
@@ -161,7 +223,75 @@ int execute(char **args){
         }
     }
 
-    return external(args);
+    return -1;
+
+}
+
+int execute_commands(C *cmd){
+
+    int in_fd=0;
+    pid_t pid;
+    int status;
+
+    for(int i=0;i<cmd_len;i++){
+
+        int fd[2];
+
+        if(i<cmd_len-1){
+            if(pipe(fd)==-1){
+                printf("Piping error");
+                exit(EXIT_FAILURE);
+            }
+        }
+
+        pid = fork();
+
+        if(pid==-1) exit(EXIT_FAILURE);
+
+        if(pid==0) {
+            if (in_fd != 0) { //not the first process then read
+                dup2(in_fd, STDIN_FILENO);
+                close(in_fd);
+            }
+
+            if (i < cmd_len - 1) { //set ouput for propagation
+                dup2(fd[1], STDOUT_FILENO); //so if we write in fd[1] , we can read from there fd[0] later
+                close(fd[1]);
+            }
+
+            if (fd[0]) { // read fd[0] , write fd[1]
+                close(fd[0]);
+            }
+
+            if (external(cmd[i].args) == 0) {
+                exit(0);
+            }
+            exit(1);
+        }else{
+            waitpid(pid,&status,0);
+
+            if(in_fd!=0){ //close prev file
+                close(in_fd);
+            }
+
+            if (i < cmd_len - 1) { //close write
+                close(fd[1]);
+            }
+
+            //save the read
+            if(i<cmd_len-1){
+                in_fd=fd[0]; //pipe it down to next command
+            }
+
+        }
+
+    }
+
+    if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+        return 0;
+    }
+
+    return 1;
 
 }
 
@@ -170,13 +300,24 @@ void loop(){
     int status;
 
     char *line,**args;
+    C *cmd;
 
     do{
 
         printf(">");
         line = get_input();
+
         args = tokenize(line);
-        status = execute(args);
+        cmd= parse_cmd(args);
+
+        status=execute(args);
+
+        if(status==-1) {
+            status = execute_commands(cmd);
+
+            for(int i=0;i<cmd_len;i++) free(cmd[i].args);
+            free(cmd);
+        }
 
         free(line);
         free(args);
